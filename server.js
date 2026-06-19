@@ -1,41 +1,16 @@
 const http = require('http');
 const WebSocket = require('ws');
-const cloudscraper = require('cloudscraper');
 
-let cachedCookies = ''; // empty by default
-let fetchPromise = null;
+let sessionCookie = ''; // User-provided cookie
 
-// ----- Try to get cookies (optional) -----
-async function tryFetchCookies() {
-  try {
-    console.log('Attempting to fetch session cookies...');
-    const res = await cloudscraper.get('https://kahoot.it', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-      },
-      resolveWithFullResponse: true,
-      timeout: 10000
-    });
-    const setCookie = res.headers['set-cookie'];
-    if (setCookie && setCookie.length > 0) {
-      const cookies = setCookie.map(c => c.split(';')[0]).join('; ');
-      console.log('Cookies obtained:', cookies.substring(0, 100) + '...');
-      return cookies;
-    }
-  } catch (e) {
-    console.log('Cookie fetch failed, continuing without cookies.');
-  }
-  return ''; // empty string = no cookies
-}
-
-// ----- Bot creation (no cookies required) -----
-function createBot(pin, username, cookies, onStatus) {
+// ----- Bot creation (no cookies unless provided) -----
+function createBot(pin, username, cookie, onStatus) {
   return new Promise((resolve, reject) => {
     const headers = {
       'Origin': 'https://play.kahoot.it',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     };
-    if (cookies) headers['Cookie'] = cookies;
+    if (cookie) headers['Cookie'] = cookie;
 
     const ws = new WebSocket('wss://play.kahoot.it/cometd/websocket', { headers });
     let clientId = null, joined = false, msgId = 0;
@@ -121,7 +96,7 @@ function createBot(pin, username, cookies, onStatus) {
   });
 }
 
-// ----- Frontend HTML (unchanged) -----
+// ----- Frontend HTML -----
 const frontend = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -131,7 +106,7 @@ const frontend = `<!DOCTYPE html>
     body { background:#0a0a0a; color:#0f0; font-family:monospace; padding:20px; }
     .container { max-width:700px; margin:auto; background:#111; padding:20px; border:2px solid #0f0; border-radius:8px; }
     .disclaimer { background:#300; color:#f88; padding:10px; margin-bottom:15px; border-radius:4px; text-align:center; }
-    input { background:#222; color:#0f0; border:1px solid #0a0; padding:8px; margin:5px 0; width:100%; font-family:monospace; }
+    input, textarea { background:#222; color:#0f0; border:1px solid #0a0; padding:8px; margin:5px 0; width:100%; font-family:monospace; }
     button { background:#030; color:#0f0; border:2px solid #0f0; padding:10px; cursor:pointer; margin:5px; font-weight:bold; }
     button:hover { background:#050; }
     .stop { border-color:#f44; color:#f44; background:#300; }
@@ -142,12 +117,18 @@ const frontend = `<!DOCTYPE html>
 </head>
 <body>
 <div class="container">
-  <div class="disclaimer">⚠️ Educational use only.</div>
+  <div class="disclaimer">
+    ⚠️ Educational use only.<br>
+    <strong>Step 1:</strong> Open <code>https://kahoot.it</code>, press F12 → Application → Cookies → copy the value of <code>AWSALB</code> or <code>AWSALBCORS</code> and paste it below.<br>
+    <strong>Step 2:</strong> Enter the game PIN and launch.
+  </div>
   <h1>Kahoot Flooder</h1>
   <label>Game PIN (7 digits)</label>
   <input type="text" id="pin" placeholder="1234567" maxlength="7">
   <label>Bot Name Prefix</label>
   <input type="text" id="prefix" value="Bot">
+  <label>Session Cookie (from kahoot.it)</label>
+  <input type="text" id="cookie" placeholder="AWSALB=abc123...">
   <label>Number of Bots</label>
   <input type="range" id="count" min="1" max="500" value="25" oninput="document.getElementById('countVal').textContent=this.value">
   <span id="countVal">25</span>
@@ -185,8 +166,6 @@ const frontend = `<!DOCTYPE html>
         add('ERROR: ' + msg.message, 'err');
       } else if (msg.type === 'done') {
         add('Attack finished.', 'ok');
-      } else if (msg.type === 'cookie_status') {
-        add(msg.message, 'ok');
       }
     };
     ws.onerror = () => add('Connection lost', 'err');
@@ -195,6 +174,8 @@ const frontend = `<!DOCTYPE html>
   function launch() {
     const pin = document.getElementById('pin').value;
     if (!/^\\d{7}$/.test(pin)) return add('Invalid PIN', 'err');
+    const cookie = document.getElementById('cookie').value.trim();
+    if (!cookie) return add('Session cookie is required! See instructions above.', 'err');
     botCount = +document.getElementById('count').value;
     joinedCount = 0;
     document.getElementById('progress').textContent = 'Launching...';
@@ -204,10 +185,10 @@ const frontend = `<!DOCTYPE html>
       connect();
       setTimeout(() => {
         if (ws.readyState === WebSocket.OPEN)
-          ws.send(JSON.stringify({ action:'launch', pin, botCount, namePrefix: document.getElementById('prefix').value || 'Bot' }));
+          ws.send(JSON.stringify({ action:'launch', pin, botCount, namePrefix: document.getElementById('prefix').value || 'Bot', sessionCookie: cookie }));
       }, 1000);
     } else {
-      ws.send(JSON.stringify({ action:'launch', pin, botCount, namePrefix: document.getElementById('prefix').value || 'Bot' }));
+      ws.send(JSON.stringify({ action:'launch', pin, botCount, namePrefix: document.getElementById('prefix').value || 'Bot', sessionCookie: cookie }));
     }
   }
 
@@ -231,27 +212,22 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', clientWs => {
-  console.log('Browser connected');
   clientWs.on('message', async raw => {
     let req;
     try { req = JSON.parse(raw); } catch { return; }
     if (req.action !== 'launch') return;
 
-    const { pin, botCount, namePrefix } = req;
-    // Ensure cookies are fetched (or continue without them)
-    if (cachedCookies === '' && !fetchPromise) {
-      fetchPromise = tryFetchCookies().then(c => { cachedCookies = c; fetchPromise = null; return c; });
-    }
-    if (fetchPromise) {
-      clientWs.send(JSON.stringify({ type: 'cookie_status', message: 'Checking session...' }));
-      try { await fetchPromise; } catch {}
+    const { pin, botCount, namePrefix, sessionCookie } = req;
+    if (!sessionCookie) {
+      clientWs.send(JSON.stringify({ type: 'error', message: 'No session cookie!' }));
+      return;
     }
 
     for (let i = 1; i <= botCount; i++) {
       const username = (namePrefix || 'Bot') + Math.floor(Math.random() * 9000 + 1000);
       clientWs.send(JSON.stringify({ type: 'status', botIndex: i, message: 'Starting ' + username + '...' }));
       try {
-        await createBot(pin, username, cachedCookies, (statusMsg) => {
+        await createBot(pin, username, sessionCookie, (statusMsg) => {
           clientWs.send(JSON.stringify({ type: 'status', botIndex: i, message: statusMsg }));
         });
       } catch (err) {
