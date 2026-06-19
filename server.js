@@ -1,32 +1,57 @@
 const http = require('http');
+const https = require('https'); // for manual request fallback
 const WebSocket = require('ws');
 const cloudscraper = require('cloudscraper');
 
 let cachedCookies = null;
 let fetchPromise = null;
 
-// ----- Automatically get cookies (bypass Cloudflare) -----
+// ----- Automatically get cookies from play.kahoot.it -----
 async function getCookies() {
-  console.log('Fetching Kahoot session cookies...');
-  const res = await cloudscraper.get('https://kahoot.it', {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-    },
-    resolveWithFullResponse: true
-  });
-  const cookies = (res.headers['set-cookie'] || [])
-    .map(c => c.split(';')[0]).join('; ');
-  if (!cookies) throw new Error('No cookies received');
-  console.log('Cookies:', cookies.substring(0, 100) + '...');
-  return cookies;
+  console.log('Fetching session cookies from play.kahoot.it...');
+  try {
+    const res = await cloudscraper.get('https://play.kahoot.it', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+      },
+      resolveWithFullResponse: true
+    });
+    console.log('Response status:', res.statusCode);
+    console.log('Response headers:', JSON.stringify(res.headers));
+    const setCookie = res.headers['set-cookie'];
+    if (!setCookie || setCookie.length === 0) throw new Error('No cookies in response');
+    const cookies = setCookie.map(c => c.split(';')[0]).join('; ');
+    console.log('Cookies:', cookies.substring(0, 100) + '...');
+    return cookies;
+  } catch (err) {
+    console.error('cloudscraper failed:', err.message);
+    // Fallback: try a plain HTTPS request (might get a block page, but can help debug)
+    console.log('Attempting plain HTTPS request as fallback...');
+    return new Promise((resolve, reject) => {
+      https.get('https://play.kahoot.it', {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+        }
+      }, (res) => {
+        console.log('Fallback status:', res.statusCode);
+        const cookies = (res.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
+        console.log('Fallback cookies:', cookies.substring(0, 100) || '(none)');
+        if (cookies) {
+          resolve(cookies);
+        } else {
+          reject(new Error('No cookies even from fallback'));
+        }
+      }).on('error', reject);
+    });
+  }
 }
 
-// ----- Bot connection (Kahoot WebSocket) -----
+// ----- Bot creation (now uses play.kahoot.it) -----
 function createBot(pin, username, cookies, onStatus) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket('wss://kahoot.it/cometd/websocket', {
+    const ws = new WebSocket('wss://play.kahoot.it/cometd/websocket', {
       headers: {
-        'Origin': 'https://kahoot.it',
+        'Origin': 'https://play.kahoot.it',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Cookie': cookies
       }
@@ -69,10 +94,7 @@ function createBot(pin, username, cookies, onStatus) {
       } else if (ch === '/meta/subscribe' && msg.successful) {
         ws.send(JSON.stringify({
           channel: '/service/controller', clientId,
-          data: {
-            gameid: pin, name: username,
-            host: 'kahoot.it', type: 'login'
-          },
+          data: { gameid: pin, name: username, host: 'play.kahoot.it', type: 'login' },
           id: String(++msgId)
         }));
       } else if (ch === '/service/player') {
@@ -97,7 +119,7 @@ function createBot(pin, username, cookies, onStatus) {
           ws.send(JSON.stringify({
             channel: '/service/controller', clientId,
             data: {
-              gameid: pin, host: 'kahoot.it',
+              gameid: pin, host: 'play.kahoot.it',
               type: 'message', content: String(answer),
               id: data.questionIndex || 0
             },
@@ -117,7 +139,7 @@ function createBot(pin, username, cookies, onStatus) {
   });
 }
 
-// ----- Frontend HTML (the page you see) -----
+// ----- Frontend HTML (unchanged) -----
 const frontend = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -236,7 +258,7 @@ wss.on('connection', clientWs => {
     const { pin, botCount, namePrefix } = req;
     if (!cachedCookies) {
       if (!fetchPromise) {
-        clientWs.send(JSON.stringify({ type: 'cookie_status', message: 'Fetching session cookies...' }));
+        clientWs.send(JSON.stringify({ type: 'cookie_status', message: 'Fetching session cookies (first launch)...' }));
         fetchPromise = getCookies()
           .then(c => { cachedCookies = c; fetchPromise = null; return c; })
           .catch(err => {
