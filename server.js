@@ -1,25 +1,23 @@
 const http = require('http');
 const WebSocket = require('ws');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 let cachedCookies = null;
 let fetchPromise = null;
 
-// ----- Auto cookie fetch using a headless browser -----
+// ----- Lightweight automatic cookie fetcher -----
 async function getCookies() {
-  console.log('Launching headless browser to get cookies...');
+  console.log('Launching headless browser (lightweight Chromium)...');
   const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage', // for low-memory environments
-    ]
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless,
   });
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36');
   await page.goto('https://play.kahoot.it', { waitUntil: 'networkidle2', timeout: 30000 });
-  // Wait a little for any Cloudflare challenge to complete
   await page.waitForTimeout(5000);
   const cookies = await page.cookies();
   await browser.close();
@@ -29,7 +27,7 @@ async function getCookies() {
   return cookieString;
 }
 
-// ----- Bot creation (same as before, using play.kahoot.it) -----
+// ----- Bot creation (unchanged) -----
 function createBot(pin, username, cookies, onStatus) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket('wss://play.kahoot.it/cometd/websocket', {
