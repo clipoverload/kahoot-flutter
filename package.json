@@ -9,8 +9,7 @@
     "node": ">=16.0.0"
   },
   "dependencies": {
-    "puppeteer-core": "^22.0.0",
-    "@sparticuz/chromium": "^123.0.0",
+    "cloudscraper": "*",
     "ws": "^8.18.0"
   }
 }
