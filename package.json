@@ -9,7 +9,6 @@
     "node": ">=16.0.0"
   },
   "dependencies": {
-    "cloudscraper": "*",
     "ws": "^8.18.0"
   }
 }
