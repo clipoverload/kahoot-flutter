@@ -1,42 +1,43 @@
 const http = require('http');
 const WebSocket = require('ws');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const cloudscraper = require('cloudscraper');
 
-let cachedCookies = null;
+let cachedCookies = ''; // empty by default
 let fetchPromise = null;
 
-// ----- Lightweight automatic cookie fetcher -----
-async function getCookies() {
-  console.log('Launching headless browser (lightweight Chromium)...');
-  const browser = await puppeteer.launch({
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    executablePath: await chromium.executablePath(),
-    headless: chromium.headless,
-  });
-  const page = await browser.newPage();
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36');
-  await page.goto('https://play.kahoot.it', { waitUntil: 'networkidle2', timeout: 30000 });
-  await page.waitForTimeout(5000);
-  const cookies = await page.cookies();
-  await browser.close();
-  if (cookies.length === 0) throw new Error('No cookies obtained');
-  const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-  console.log('Cookies:', cookieString.substring(0, 100) + '...');
-  return cookieString;
+// ----- Try to get cookies (optional) -----
+async function tryFetchCookies() {
+  try {
+    console.log('Attempting to fetch session cookies...');
+    const res = await cloudscraper.get('https://kahoot.it', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+      },
+      resolveWithFullResponse: true,
+      timeout: 10000
+    });
+    const setCookie = res.headers['set-cookie'];
+    if (setCookie && setCookie.length > 0) {
+      const cookies = setCookie.map(c => c.split(';')[0]).join('; ');
+      console.log('Cookies obtained:', cookies.substring(0, 100) + '...');
+      return cookies;
+    }
+  } catch (e) {
+    console.log('Cookie fetch failed, continuing without cookies.');
+  }
+  return ''; // empty string = no cookies
 }
 
-// ----- Bot creation (unchanged) -----
+// ----- Bot creation (no cookies required) -----
 function createBot(pin, username, cookies, onStatus) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket('wss://play.kahoot.it/cometd/websocket', {
-      headers: {
-        'Origin': 'https://play.kahoot.it',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Cookie': cookies
-      }
-    });
+    const headers = {
+      'Origin': 'https://play.kahoot.it',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    };
+    if (cookies) headers['Cookie'] = cookies;
+
+    const ws = new WebSocket('wss://play.kahoot.it/cometd/websocket', { headers });
     let clientId = null, joined = false, msgId = 0;
 
     ws.on('open', () => {
@@ -237,20 +238,14 @@ wss.on('connection', clientWs => {
     if (req.action !== 'launch') return;
 
     const { pin, botCount, namePrefix } = req;
-    if (!cachedCookies) {
-      if (!fetchPromise) {
-        clientWs.send(JSON.stringify({ type: 'cookie_status', message: 'Fetching session cookies (first launch)...' }));
-        fetchPromise = getCookies()
-          .then(c => { cachedCookies = c; fetchPromise = null; return c; })
-          .catch(err => {
-            fetchPromise = null;
-            clientWs.send(JSON.stringify({ type: 'error', message: 'Failed to get cookies: ' + err.message }));
-            throw err;
-          });
-      }
-      try { await fetchPromise; } catch { return; }
+    // Ensure cookies are fetched (or continue without them)
+    if (cachedCookies === '' && !fetchPromise) {
+      fetchPromise = tryFetchCookies().then(c => { cachedCookies = c; fetchPromise = null; return c; });
     }
-    clientWs.send(JSON.stringify({ type: 'cookie_status', message: 'Session ready' }));
+    if (fetchPromise) {
+      clientWs.send(JSON.stringify({ type: 'cookie_status', message: 'Checking session...' }));
+      try { await fetchPromise; } catch {}
+    }
 
     for (let i = 1; i <= botCount; i++) {
       const username = (namePrefix || 'Bot') + Math.floor(Math.random() * 9000 + 1000);
