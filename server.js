@@ -1,52 +1,35 @@
 const http = require('http');
-const https = require('https'); // for manual request fallback
 const WebSocket = require('ws');
-const cloudscraper = require('cloudscraper');
+const puppeteer = require('puppeteer');
 
 let cachedCookies = null;
 let fetchPromise = null;
 
-// ----- Automatically get cookies from play.kahoot.it -----
+// ----- Auto cookie fetch using a headless browser -----
 async function getCookies() {
-  console.log('Fetching session cookies from play.kahoot.it...');
-  try {
-    const res = await cloudscraper.get('https://play.kahoot.it', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-      },
-      resolveWithFullResponse: true
-    });
-    console.log('Response status:', res.statusCode);
-    console.log('Response headers:', JSON.stringify(res.headers));
-    const setCookie = res.headers['set-cookie'];
-    if (!setCookie || setCookie.length === 0) throw new Error('No cookies in response');
-    const cookies = setCookie.map(c => c.split(';')[0]).join('; ');
-    console.log('Cookies:', cookies.substring(0, 100) + '...');
-    return cookies;
-  } catch (err) {
-    console.error('cloudscraper failed:', err.message);
-    // Fallback: try a plain HTTPS request (might get a block page, but can help debug)
-    console.log('Attempting plain HTTPS request as fallback...');
-    return new Promise((resolve, reject) => {
-      https.get('https://play.kahoot.it', {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-        }
-      }, (res) => {
-        console.log('Fallback status:', res.statusCode);
-        const cookies = (res.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
-        console.log('Fallback cookies:', cookies.substring(0, 100) || '(none)');
-        if (cookies) {
-          resolve(cookies);
-        } else {
-          reject(new Error('No cookies even from fallback'));
-        }
-      }).on('error', reject);
-    });
-  }
+  console.log('Launching headless browser to get cookies...');
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage', // for low-memory environments
+    ]
+  });
+  const page = await browser.newPage();
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36');
+  await page.goto('https://play.kahoot.it', { waitUntil: 'networkidle2', timeout: 30000 });
+  // Wait a little for any Cloudflare challenge to complete
+  await page.waitForTimeout(5000);
+  const cookies = await page.cookies();
+  await browser.close();
+  if (cookies.length === 0) throw new Error('No cookies obtained');
+  const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+  console.log('Cookies:', cookieString.substring(0, 100) + '...');
+  return cookieString;
 }
 
-// ----- Bot creation (now uses play.kahoot.it) -----
+// ----- Bot creation (same as before, using play.kahoot.it) -----
 function createBot(pin, username, cookies, onStatus) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket('wss://play.kahoot.it/cometd/websocket', {
